@@ -68,16 +68,20 @@ Transition transition_table[] = { //таблиця переходів FSM
 
 #define Led_Pin GPIO_PIN_1 // LED
 #define Button_Pin GPIO_PIN_2 // Кнопка
+#define TIMER_BASE_FREQ 10000
 
 UART_HandleTypeDef huart1;
+TIM_HandleTypeDef htim2;
 osSemaphoreId_t Button_semaphore;
 osMessageQueueId_t Queue_FSM;
 osMessageQueueId_t Queue_LED;
 osThreadId_t ButtonTaskHandle;
+osThreadId_t DispatchTaskHandle;
+osThreadId_t LedTaskHandle;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
-
+static void MX_TIM2_Init(void);
 
 void ButtonTask(){
    Button_state state;
@@ -92,6 +96,7 @@ void ButtonTask(){
         uint32_t duration = HAL_GetTick() - start_time; // Вимірюємо скільки часу кнопка була зажата
 
         if(duration > 2000){
+          state = long_press;
           osMessageQueuePut(Queue_FSM, &state, 0, 0); // Надсилаємо в чергу 3(Long press)
         }
         else{
@@ -138,7 +143,7 @@ void DispatchTask(void *argument) {
         {
 
           if (transition_table[i].action != NULL) {
-             osMessageQueuePut(Queue_LED, transition_table[i].action, 0, 0); // Відправляємо вказівник на функцію
+             osMessageQueuePut(Queue_LED, &transition_table[i].action, 0, 0); // Відправляємо вказівник на функцію
           }
 
           real_current_state = transition_table[i].Next_state; // Оновлюємо стан
@@ -150,20 +155,45 @@ void DispatchTask(void *argument) {
   }
 }
 
+void Blink_frequency(int frequency){
+  uint32_t arr_value = TIMER_BASE_FREQ / frequency;
+  __HAL_TIM_SET_AUTORELOAD(&htim2, arr_value);
+  __HAL_TIM_SET_COUNTER(&htim2, 0);
+  HAL_TIM_Base_Start_IT(&htim2);
+    
+}
+
 void Led_idle(){
-  HAL_GPIO_WritePin(GPIOC, Led_Pin, GPIO_PIN_RESET);
-  osDelay(100);
+  HAL_TIM_Base_Stop_IT(&htim2); // Зупиняємо таймер
+  HAL_GPIO_WritePin(GPIOA, Led_Pin, GPIO_PIN_RESET);
+}
+
+void Led_blink_slow(){
+  Blink_frequency(1);
+}
+
+void Led_blink_fast(){
+  Blink_frequency(10);
+}
+
+void Led_breathe(){
+  HAL_TIM_Base_Stop_IT(&htim2);
+}
+
+void Led_panic(){
+  Blink_frequency(30);
 }
 
 void LedTask(){
-  Led_output action = Led_idle;
+  Led_output action = NULL;
   for(;;){
-         if(osMessageQueueGet(Queue_LED, &action, NULL, osWaitForever) == osOK);
-         if(action != NULL){
-            action();
-         }
-         osDelay(100);
+    if(osMessageQueueGet(Queue_LED, &action, NULL, osWaitForever) == osOK){
+      if(action != NULL){
+        action();
+      }
+      osDelay(10);
     }
+  }
 }
 
 void UartTask(){
@@ -187,7 +217,7 @@ int main(void)
   /* 2. Тепер периферія */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
-
+  MX_TIM2_Init();
   /* 4. Ініціалізація RTOS */
   osKernelInitialize();
   
@@ -195,17 +225,27 @@ int main(void)
   Queue_FSM = osMessageQueueNew(10, sizeof(Button_state), NULL);
   Queue_LED = osMessageQueueNew(10, sizeof(Led_output), NULL);
 
-  const osThreadAttr_t ButtonTaskHandle_attributes = {
+  const osThreadAttr_t ButtonTask_attributes = {
     .name = "ButtonTask",
     .stack_size = 2048,
     .priority = (osPriority_t) osPriorityAboveNormal,
   };
+  const osThreadAttr_t DispatchTask_attributes = {
+    .name = "Dispatch", 
+    .stack_size = 2048, 
+    .priority = osPriorityNormal
+  };
+  const osThreadAttr_t LedTask_attributes = {
+    .name = "LedTask", 
+    .stack_size = 2048, 
+    .priority = osPriorityNormal
+  };
   
-  ButtonTaskHandle = osThreadNew(ButtonTask, NULL, &ButtonTaskHandle_attributes);
+  ButtonTaskHandle = osThreadNew(ButtonTask, NULL, &ButtonTask_attributes);
+  DispatchTaskHandle = osThreadNew(DispatchTask, NULL, &DispatchTask_attributes);
+  LedTaskHandle = osThreadNew(LedTask, NULL, &LedTask_attributes);
   osKernelStart();
-   while(1){
-
-  }
+  while(1){}
 }
 
 /**
@@ -247,6 +287,53 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 1599;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 9999;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  HAL_NVIC_SetPriority(TIM2_IRQn, 5, 0); // Пріоритет нижчий за системний тик
+  HAL_NVIC_EnableIRQ(TIM2_IRQn);
+  /* USER CODE END TIM2_Init 2 */
+
 }
 
 /**
@@ -328,8 +415,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
   if(GPIO_Pin == Button_Pin){
     static uint32_t last_interrupt_time = 0;
     uint32_t current_time = HAL_GetTick();
-    // Якщо переривання прийшло швидше ніж через 50 мс — ігноруємо його
-    if ((current_time - last_interrupt_time) > 50) {
+    // Якщо переривання прийшло швидше ніж через 60 мс — ігноруємо його
+    if ((current_time - last_interrupt_time) > 60) {
       osSemaphoreRelease(Button_semaphore);
     }
     last_interrupt_time = current_time;
@@ -366,11 +453,13 @@ void StartDefaultTask(void *argument)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
-
   /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM1)
-  {
-    HAL_IncTick();
+  if (htim->Instance == TIM1) {
+    HAL_IncTick(); // Потрібно для FreeRTOS
+  }
+  // Додай цей блок:
+  if (htim->Instance == TIM2) {
+    HAL_GPIO_TogglePin(GPIOA, Led_Pin); 
   }
   /* USER CODE BEGIN Callback 1 */
 
@@ -386,6 +475,7 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  Blink_frequency(20);
   while (1)
   {
   }
