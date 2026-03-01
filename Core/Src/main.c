@@ -23,7 +23,9 @@
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
 #include "semphr.h"
+#include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_gpio.h"
+#include "stm32f4xx_hal_tim.h"
 #include "task.h"
 #include <stdbool.h>
 
@@ -66,22 +68,55 @@ Transition transition_table[] = { //таблиця переходів FSM
   {ANY_STATE, long_press, PANIC, Led_panic}
 };
 
+
+ /* USER CODE BEGIN 1 */
+// Гамма-коригована крива: 0 -> 99 (вгору) та 99 -> 0 (вниз)
+const uint32_t gamma_table[] = {
+   0, 1, 2, 4, 7, 10, 14, 19, 25, 31, 38, 46, 55, 65, 75, 87, 99, 112, 126, 141,
+    156, 172, 190, 207, 226, 245, 265, 286, 307, 329, 351, 374, 397, 421, 445, 470, 495, 520, 545, 570,
+    596, 621, 646, 672, 696, 721, 745, 769, 792, 815, 837, 858, 879, 899, 918, 936, 953, 969, 983, 995,
+    1006, 1016, 1025, 1033, 1040, 1045, 1050, 1054, 1057, 1059, 1060, 1060, 1059, 1057, 1054, 1050, 1045, 1040, 1033, 1025,
+    1016, 1006, 998, 988, 977, 965, 952, 939, 924, 909, 893, 876, 858, 840, 821, 802, 782, 762, 741, 720,
+    698, 677, 655, 633, 611, 589, 567, 545, 523, 501, 479, 458, 437, 416, 395, 375, 355, 335, 316, 297,
+    279, 261, 244, 227, 211, 196, 181, 167, 154, 141, 129, 118, 108, 98, 89, 80, 72, 65, 58, 52,
+    46, 41, 36, 31, 27, 23, 19, 16, 13, 11, 9, 7, 5, 4, 3, 2, 1, 1, 0, 0
+};
+/* USER CODE END 1 */
+#define GAMMA_SIZE (sizeof(gamma_table)/sizeof(gamma_table[0]))
+
 #define Led_Pin GPIO_PIN_1 // LED
 #define Button_Pin GPIO_PIN_2 // Кнопка
 #define TIMER_BASE_FREQ 10000
 
 UART_HandleTypeDef huart1;
 TIM_HandleTypeDef htim2;
+//DMA_HandleTypeDef hdma_tim2_ch2;
+DMA_HandleTypeDef hdma_tim2_ch2_ch4;
 osSemaphoreId_t Button_semaphore;
 osMessageQueueId_t Queue_FSM;
 osMessageQueueId_t Queue_LED;
 osThreadId_t ButtonTaskHandle;
 osThreadId_t DispatchTaskHandle;
 osThreadId_t LedTaskHandle;
+GPIO_InitTypeDef GPIO_InitStruct = {0};
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_DMA_Init(void);
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+
+void GPIO_LED_OUTPUT(){
+  HAL_NVIC_DisableIRQ(EXTI2_IRQn);
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = Led_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  osDelay(10);
+  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
+}
 
 void ButtonTask(){
    Button_state state;
@@ -141,7 +176,7 @@ void DispatchTask(void *argument) {
              transition_table[i].Current_state == ANY_STATE) &&
             transition_table[i].input == receivedEvent) 
         {
-
+          
           if (transition_table[i].action != NULL) {
              osMessageQueuePut(Queue_LED, &transition_table[i].action, 0, 0); // Відправляємо вказівник на функцію
           }
@@ -156,40 +191,66 @@ void DispatchTask(void *argument) {
 }
 
 void Blink_frequency(int frequency){
-  uint32_t arr_value = TIMER_BASE_FREQ / frequency;
+  uint32_t arr_value = TIMER_BASE_FREQ / frequency; // рахуємо нове значення для Регістру автоперезавантаження
+  GPIO_LED_OUTPUT();
+  __HAL_TIM_SET_PRESCALER(&htim2, 1599);
   __HAL_TIM_SET_AUTORELOAD(&htim2, arr_value);
-  __HAL_TIM_SET_COUNTER(&htim2, 0);
-  HAL_TIM_Base_Start_IT(&htim2);
+  __HAL_TIM_SET_COUNTER(&htim2, 0); // Обнуляємо таймер
+  HAL_TIM_Base_Start_IT(&htim2); // Запускаємо таймер
+  __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
     
 }
 
-void Led_idle(){
-  HAL_TIM_Base_Stop_IT(&htim2); // Зупиняємо таймер
+void PWM_initialization(){
+  // 1. Спочатку ПОВНІСТЮ зупиняємо все старе
+  HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2); 
+  HAL_TIM_Base_Stop_IT(&htim2);
+  __HAL_TIM_DISABLE_IT(&htim2, TIM_IT_UPDATE);
+  __HAL_TIM_SET_PRESCALER(&htim2, 159);
+  // 2. Перемикаємо пін
+  HAL_TIM_MspPostInit(&htim2);
+
+  // 4. Налаштовуємо таймінг
+  /*__HAL_TIM_SET_AUTORELOAD(&htim2, 16159);
+  __HAL_TIM_SET_PRESCALER(&htim2, 100);*/
+  __HAL_TIM_SET_COUNTER(&htim2, 0);
+
+  HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_2, gamma_table, GAMMA_SIZE);
+}
+
+void Led_idle() {
+  HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2);
+  HAL_TIM_Base_Stop_IT(&htim2);
+  GPIO_LED_OUTPUT();
   HAL_GPIO_WritePin(GPIOA, Led_Pin, GPIO_PIN_RESET);
 }
 
 void Led_blink_slow(){
-  Blink_frequency(1);
+  Blink_frequency(1); // Задаємо частоту 1Гц
 }
 
 void Led_blink_fast(){
-  Blink_frequency(10);
+  Blink_frequency(10);// Задаємо частоту 10Гц
 }
 
-void Led_breathe(){
-  HAL_TIM_Base_Stop_IT(&htim2);
+void Led_breathe(){ // Зупиняємо таймер
+  PWM_initialization();
 }
 
 void Led_panic(){
-  Blink_frequency(30);
+  HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2);
+  HAL_TIM_Base_Stop_IT(&htim2);
+  GPIO_LED_OUTPUT();
+
+  Blink_frequency(20);// Задаємо частоту 20Гц
 }
 
 void LedTask(){
   Led_output action = NULL;
   for(;;){
-    if(osMessageQueueGet(Queue_LED, &action, NULL, osWaitForever) == osOK){
+    if(osMessageQueueGet(Queue_LED, &action, NULL, osWaitForever) == osOK){ // Отримуємо вказівнки на функцію через чергу
       if(action != NULL){
-        action();
+        action(); // Задаємо частоту для LED за допомогою вказівника на функцію
       }
       osDelay(10);
     }
@@ -217,6 +278,7 @@ int main(void)
   /* 2. Тепер периферія */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
+  MX_DMA_Init();
   MX_TIM2_Init();
   /* 4. Ініціалізація RTOS */
   osKernelInitialize();
@@ -240,7 +302,7 @@ int main(void)
     .stack_size = 2048, 
     .priority = osPriorityNormal
   };
-  
+  HAL_GPIO_WritePin(GPIOA,Led_Pin, GPIO_PIN_RESET);
   ButtonTaskHandle = osThreadNew(ButtonTask, NULL, &ButtonTask_attributes);
   DispatchTaskHandle = osThreadNew(DispatchTask, NULL, &DispatchTask_attributes);
   LedTaskHandle = osThreadNew(LedTask, NULL, &LedTask_attributes);
@@ -289,6 +351,19 @@ void SystemClock_Config(void)
   }
 }
 
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
+
+}
+
 /**
   * @brief TIM2 Initialization Function
   * @param None
@@ -303,14 +378,15 @@ static void MX_TIM2_Init(void)
 
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
 
   /* USER CODE BEGIN TIM2_Init 1 */
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 1599;
+  htim2.Init.Prescaler = 159;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 9999;
+  htim2.Init.Period = 999;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -322,6 +398,10 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK) {
+    Error_Handler();
+  }
+  
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
@@ -334,6 +414,16 @@ static void MX_TIM2_Init(void)
   HAL_NVIC_EnableIRQ(TIM2_IRQn);
   /* USER CODE END TIM2_Init 2 */
 
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+  /* USER CODE END TIM2_Init 2 */
 }
 
 /**
@@ -376,7 +466,6 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -459,7 +548,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
   // Додай цей блок:
   if (htim->Instance == TIM2) {
-    HAL_GPIO_TogglePin(GPIOA, Led_Pin); 
+    //HAL_GPIO_TogglePin(GPIOA, Led_Pin); 
+    if ((GPIOA->MODER & (GPIO_MODER_MODER1_Msk)) == (GPIO_MODER_MODER1_0)) {
+      HAL_GPIO_TogglePin(GPIOA, Led_Pin); 
+    }
   }
   /* USER CODE BEGIN Callback 1 */
 

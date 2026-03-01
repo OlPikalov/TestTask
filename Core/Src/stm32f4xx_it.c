@@ -57,7 +57,7 @@
 /* External variables --------------------------------------------------------*/
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim1;
-
+extern DMA_HandleTypeDef hdma_tim2_ch2_ch4;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -203,5 +203,14 @@ void TIM2_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void DMA1_Stream6_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Stream6_IRQn 0 */
 
+  /* USER CODE END DMA1_Stream6_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_tim2_ch2_ch4);
+  /* USER CODE BEGIN DMA1_Stream6_IRQn 1 */
+
+  /* USER CODE END DMA1_Stream6_IRQn 1 */
+}
 /* USER CODE END 1 */
