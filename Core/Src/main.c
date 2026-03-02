@@ -23,6 +23,7 @@
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
 #include "semphr.h"
+#include "stm32_hal_legacy.h"
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_gpio.h"
 #include "stm32f4xx_hal_tim.h"
@@ -33,7 +34,7 @@ typedef enum{
   short_press = 1,
   double_press = 2,
   long_press = 3
-}Button_state;
+}Button_state; //Стани кнопок
 
 typedef enum {
   IDLE,
@@ -42,7 +43,7 @@ typedef enum {
   BREATHE,
   PANIC,
   ANY_STATE
-}Led_state;
+}Led_state; // Стани леду
 
 typedef void (*Led_output)(void);
 
@@ -51,7 +52,7 @@ typedef struct{
   Button_state input;
   Led_state Next_state;
   Led_output action;
-}Transition;
+}Transition; 
 
 void Led_idle(void);
 void Led_blink_slow(void);
@@ -70,7 +71,7 @@ Transition transition_table[] = { //таблиця переходів FSM
 
 
  /* USER CODE BEGIN 1 */
-// Гамма-коригована крива: 0 -> 99 (вгору) та 99 -> 0 (вниз)
+// Гамма-коригована крива:
 const uint32_t gamma_table[] = {
    0, 1, 2, 4, 7, 10, 14, 19, 25, 31, 38, 46, 55, 65, 75, 87, 99, 112, 126, 141,
     156, 172, 190, 207, 226, 245, 265, 286, 307, 329, 351, 374, 397, 421, 445, 470, 495, 520, 545, 570,
@@ -90,7 +91,6 @@ const uint32_t gamma_table[] = {
 
 UART_HandleTypeDef huart1;
 TIM_HandleTypeDef htim2;
-//DMA_HandleTypeDef hdma_tim2_ch2;
 DMA_HandleTypeDef hdma_tim2_ch2_ch4;
 osSemaphoreId_t Button_semaphore;
 osMessageQueueId_t Queue_FSM;
@@ -106,7 +106,7 @@ static void MX_TIM2_Init(void);
 static void MX_DMA_Init(void);
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
-void GPIO_LED_OUTPUT(){
+void GPIO_LED_OUTPUT(){ //Конфігурація ЛЕД на OUTPUT_PP
   HAL_NVIC_DisableIRQ(EXTI2_IRQn);
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   GPIO_InitStruct.Pin = Led_Pin;
@@ -164,8 +164,8 @@ void ButtonTask(){
 
 void DispatchTask(void *argument) { 
   int transition_table_size = sizeof(transition_table) / sizeof(Transition);
-  static Led_state real_current_state = IDLE;
-  Button_state receivedEvent;
+  static Led_state real_current_state = IDLE; //Поточний стан
+  Button_state receivedEvent; // Вхідний сигнал від кнопки
 
   for (;;) {
     if (osMessageQueueGet(Queue_FSM, &receivedEvent, NULL, osWaitForever) == osOK) {
@@ -202,24 +202,18 @@ void Blink_frequency(int frequency){
 }
 
 void PWM_initialization(){
-  // 1. Спочатку ПОВНІСТЮ зупиняємо все старе
-  HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2); 
-  HAL_TIM_Base_Stop_IT(&htim2);
   __HAL_TIM_DISABLE_IT(&htim2, TIM_IT_UPDATE);
   __HAL_TIM_SET_PRESCALER(&htim2, 159);
   // 2. Перемикаємо пін
-  HAL_TIM_MspPostInit(&htim2);
+  HAL_TIM_MspPostInit(&htim2); //ініціалізуємо ЛЕД як AF_PP
 
-  // 4. Налаштовуємо таймінг
-  /*__HAL_TIM_SET_AUTORELOAD(&htim2, 16159);
-  __HAL_TIM_SET_PRESCALER(&htim2, 100);*/
   __HAL_TIM_SET_COUNTER(&htim2, 0);
 
-  HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_2, gamma_table, GAMMA_SIZE);
+  HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_2, gamma_table, GAMMA_SIZE); //Запускаємо PWM з DMA
 }
 
 void Led_idle() {
-  HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2); //Коректна зупинка DMA
   HAL_TIM_Base_Stop_IT(&htim2);
   GPIO_LED_OUTPUT();
   HAL_GPIO_WritePin(GPIOA, Led_Pin, GPIO_PIN_RESET);
@@ -233,12 +227,12 @@ void Led_blink_fast(){
   Blink_frequency(10);// Задаємо частоту 10Гц
 }
 
-void Led_breathe(){ // Зупиняємо таймер
+void Led_breathe(){
   PWM_initialization();
 }
 
 void Led_panic(){
-  HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2); //Коректна зупинка DMA
   HAL_TIM_Base_Stop_IT(&htim2);
   GPIO_LED_OUTPUT();
 
@@ -544,15 +538,39 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 0 */
   /* USER CODE END Callback 0 */
   if (htim->Instance == TIM1) {
-    HAL_IncTick(); // Потрібно для FreeRTOS
+    HAL_IncTick(); 
   }
-  // Додай цей блок:
+
   if (htim->Instance == TIM2) {
-    //HAL_GPIO_TogglePin(GPIOA, Led_Pin); 
+
+    uint32_t pclk = HAL_RCC_GetPCLK1Freq();
+
+    uint32_t current_psc = htim2.Instance->PSC;
+    uint32_t current_arr = htim2.Instance->ARR;
+
+    float current_freq = (float)pclk / ((current_psc + 1) * (current_arr + 1));
+
     if ((GPIOA->MODER & (GPIO_MODER_MODER1_Msk)) == (GPIO_MODER_MODER1_0)) {
-      HAL_GPIO_TogglePin(GPIOA, Led_Pin); 
+      HAL_GPIO_TogglePin(GPIOA, Led_Pin);
     }
+    static uint32_t First_Timer_callback = 0;
+    if (current_freq > 19.5f && current_freq < 20.5f) { // Перевірка на стан PANIC
+
+      if (First_Timer_callback == 0) {
+        First_Timer_callback = HAL_GetTick(); 
+      }
+
+      if ((HAL_GetTick() - First_Timer_callback) > 3000) { //Пройшло 3 секунди виконуєм ресет
+        taskDISABLE_INTERRUPTS();
+        __disable_irq();
+        NVIC_SystemReset();
+      }
+            
+      
+    }
+    else First_Timer_callback = 0;
   }
+  
   /* USER CODE BEGIN Callback 1 */
 
   /* USER CODE END Callback 1 */
@@ -566,8 +584,6 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  Blink_frequency(20);
   while (1)
   {
   }
