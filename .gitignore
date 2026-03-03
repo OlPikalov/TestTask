@@ -1,0 +1,41 @@
+# --- Результати компіляції ---
+bin/
+obj/
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# --- Локальні налаштування VS Code ---
+.vscode/*
+
+
+# --- Сміття компілятора та IDE ---
+*.o
+*.d
+*.su
+*.uio
+.dep/
+.mxproject
+
+# --- Налаштування STM32CubeIDE ---
+.settings/
+.project
+.cproject
+STM32CubeIDE/
+Debug/
+Release/
+
+# --- Тимчасові файли ---
+*~
+*.swp
+*.bak
+*.log
+.DS_Store
+Thumbs.db
+
+# --- Файли налаштувань розширення ST для VS Code ---
+st_project_config.h
+stm32-solutions.json
