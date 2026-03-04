@@ -77,6 +77,17 @@
 #define configUSE_RECURSIVE_MUTEXES              1
 #define configUSE_COUNTING_SEMAPHORES            1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION  0
+#define configCHECK_FOR_STACK_OVERFLOW           2
+#define configGENERATE_RUN_TIME_STATS            1
+#define configUSE_STATS_FORMATTING_FUNCTIONS     1
+#define configUSE_QUEUES                         1
+
+extern void StartTimerForRunTimeStats(void);
+extern uint32_t GetTimerForRunTimeStats(void);
+
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() StartTimerForRunTimeStats()
+#define portGET_RUN_TIME_COUNTER_VALUE()         GetTimerForRunTimeStats()
+
 /* USER CODE BEGIN MESSAGE_BUFFER_LENGTH_TYPE */
 /* Defaults to size_t for backward compatibility, but can be changed
    if lengths will always be less than the number of bytes in a size_t. */
