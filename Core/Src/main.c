@@ -20,15 +20,26 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include <string.h>
-#include "FreeRTOS.h"
-#include "cmsis_os2.h"
+//#include "FreeRTOS.h"
+//#include "cmsis_os2.h"
 #include "semphr.h"
-#include "stm32_hal_legacy.h"
-#include "stm32f4xx_hal.h"
-#include "stm32f4xx_hal_gpio.h"
-#include "stm32f4xx_hal_tim.h"
-#include "task.h"
+//#include "stm32_hal_legacy.h"
+//#include "stm32f4xx_hal.h"
+//#include "stm32f4xx_hal_gpio.h"
+//#include "stm32f4xx_hal_tim.h"
+//#include "stm32f4xx_hal_uart.h"
+//#include "task.h"
 #include <stdbool.h>
+#include <stdio.h>
+//#include <sys/_types.h>
+
+void StartTimerForRunTimeStats(void);
+uint32_t GetTimerForRunTimeStats(void);
+
+
+uint8_t rx_data;          // Тимчасовий байт
+char rx_buffer[20];       // Буфер для команди
+int rx_index = 0;         //індекс буфера
 
 typedef enum{
   short_press = 1,
@@ -44,6 +55,11 @@ typedef enum {
   PANIC,
   ANY_STATE
 }Led_state; // Стани леду
+
+typedef struct {
+    Button_state state;
+    TickType_t timestamp;
+} Queue_FSM_data; // Структура данних для передачі в DispatchTask
 
 typedef void (*Led_output)(void);
 
@@ -69,8 +85,27 @@ Transition transition_table[] = { //таблиця переходів FSM
   {ANY_STATE, long_press, PANIC, Led_panic}
 };
 
+static Led_state real_current_state = IDLE; // Поточний стан автомата
 
- /* USER CODE BEGIN 1 */
+typedef struct {
+  const char* command_name;
+  void (*action)();
+} Input_commands;
+
+void status();
+void tasks();
+void drop_to_idle();
+void panic();
+void reset_stats();
+
+Input_commands command_table[] = {
+  {"status", status},
+  {"tasks",tasks},
+  {"drop_to_idle",drop_to_idle},
+  {"panic",panic},
+  {"reset_stats", reset_stats}
+}; //Таблиця для опрацювання команд
+
 // Гамма-коригована крива:
 const uint32_t gamma_table[] = {
    0, 1, 2, 4, 7, 10, 14, 19, 25, 31, 38, 46, 55, 65, 75, 87, 99, 112, 126, 141,
@@ -82,7 +117,7 @@ const uint32_t gamma_table[] = {
     279, 261, 244, 227, 211, 196, 181, 167, 154, 141, 129, 118, 108, 98, 89, 80, 72, 65, 58, 52,
     46, 41, 36, 31, 27, 23, 19, 16, 13, 11, 9, 7, 5, 4, 3, 2, 1, 1, 0, 0
 };
-/* USER CODE END 1 */
+
 #define GAMMA_SIZE (sizeof(gamma_table)/sizeof(gamma_table[0]))
 
 #define Led_Pin GPIO_PIN_1 // LED
@@ -91,20 +126,71 @@ const uint32_t gamma_table[] = {
 
 UART_HandleTypeDef huart1;
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
 DMA_HandleTypeDef hdma_tim2_ch2_ch4;
-osSemaphoreId_t Button_semaphore;
+SemaphoreHandle_t Button_semaphore;
+SemaphoreHandle_t  UART_INPUT_semaphore;
 osMessageQueueId_t Queue_FSM;
 osMessageQueueId_t Queue_LED;
+osMessageQueueId_t Queue_UART;
 osThreadId_t ButtonTaskHandle;
 osThreadId_t DispatchTaskHandle;
 osThreadId_t LedTaskHandle;
+osThreadId_t UartTaskHandle;
+osThreadId_t StatsTaskHandle;
 GPIO_InitTypeDef GPIO_InitStruct = {0};
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_TIM3_Init(void);
 static void MX_DMA_Init(void);
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+void Led_panic();
+
+volatile uint32_t ulHighFrequencyTimerTicks = 0;
+
+void StartTimerForRunTimeStats(void) {
+    HAL_TIM_Base_Start_IT(&htim3); // Запуск таймера для ран тайм статистики
+}
+
+uint32_t GetTimerForRunTimeStats(void) {
+    return ulHighFrequencyTimerTicks;
+}
+
+
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART1) {
+      BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+        if(rx_data == '\n'){ //Перевірка на кінець повідомлення
+
+          xSemaphoreGiveFromISR(UART_INPUT_semaphore, &xHigherPriorityTaskWoken); //Надаємо семафор FromISR
+          if (xHigherPriorityTaskWoken == pdTRUE) {
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+          }
+        }
+
+        if (rx_index < sizeof(rx_buffer) - 1) { // залишаємо місце для \0
+            rx_buffer[rx_index++] = rx_data;
+            rx_buffer[rx_index] = '\0'; // Завжди тримаємо рядок валідним
+        } else {
+            rx_index = 0; // Захист від переповнення
+        }
+        HAL_UART_Receive_IT(&huart1, &rx_data, 1); //очікуємо новий байт
+    }
+}
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
+    __disable_irq(); // Зупиняємо все, RTOS більше не працює
+    
+    char *failed_task_name = pcTaskName;
+    while(1) {
+        HAL_GPIO_TogglePin(GPIOA, Led_Pin);
+        for(volatile int i = 0; i < 200000; i++); // Груба затримка
+    }
+}
 
 void GPIO_LED_OUTPUT(){ //Конфігурація ЛЕД на OUTPUT_PP
   HAL_NVIC_DisableIRQ(EXTI2_IRQn);
@@ -119,8 +205,8 @@ void GPIO_LED_OUTPUT(){ //Конфігурація ЛЕД на OUTPUT_PP
 }
 
 void ButtonTask(){
-   Button_state state;
-   while(1){
+   Queue_FSM_data FSM_data;
+   for(;;){
       if(osSemaphoreAcquire(Button_semaphore ,osWaitForever) == osOK) { // Очікує семафор від кнопки
         uint32_t start_time = HAL_GetTick();
         
@@ -131,8 +217,9 @@ void ButtonTask(){
         uint32_t duration = HAL_GetTick() - start_time; // Вимірюємо скільки часу кнопка була зажата
 
         if(duration > 2000){
-          state = long_press;
-          osMessageQueuePut(Queue_FSM, &state, 0, 0); // Надсилаємо в чергу 3(Long press)
+          FSM_data.state = long_press;
+          FSM_data.timestamp = xTaskGetTickCount();
+          osMessageQueuePut(Queue_FSM, &FSM_data, 0, 0); // Надсилаємо в чергу 3(Long press)
         }
         else{
           bool second_ress = false;
@@ -148,33 +235,42 @@ void ButtonTask(){
 
           if(second_ress){
             osSemaphoreAcquire(Button_semaphore, 0); // Ловимо семафор від подвійного натискання
-            state = double_press;
-            osMessageQueuePut(Queue_FSM, &state, 0, 0); // Надсилаємо в чергу 2(double press)
+            FSM_data.state = double_press;
+            FSM_data.timestamp = xTaskGetTickCount();
+            osMessageQueuePut(Queue_FSM, &FSM_data, 0, 0); // Надсилаємо в чергу 2(double press)
           }
           else{
 
-            state = short_press;
-            osMessageQueuePut(Queue_FSM, &state, 0, 0); // Надсилаємо в чергу 1(short press)
+            FSM_data.state = short_press;
+            FSM_data.timestamp = xTaskGetTickCount();
+            osMessageQueuePut(Queue_FSM, &FSM_data, 0, 0); // Надсилаємо в чергу 1(short press)
           }
         }
+        while(osSemaphoreAcquire(Button_semaphore, 0) == osOK); // Ловимо фантомні натискання
         osDelay(100);
       }
     }
 }
 
+static int32_t max_latency = 0; // max latency
+
 void DispatchTask(void *argument) { 
   int transition_table_size = sizeof(transition_table) / sizeof(Transition);
-  static Led_state real_current_state = IDLE; //Поточний стан
-  Button_state receivedEvent; // Вхідний сигнал від кнопки
-
+  Queue_FSM_data receivedEvent; // Вхідний сигнал від кнопки
   for (;;) {
     if (osMessageQueueGet(Queue_FSM, &receivedEvent, NULL, osWaitForever) == osOK) {
-
       for (int i = 0; i < transition_table_size; i++) {
         
+        TickType_t current_tick = xTaskGetTickCount();
+        int32_t latency = current_tick - receivedEvent.timestamp;
+
+        if (latency > max_latency) {
+            max_latency = latency; // Оновлюємо max latency
+        }
+
         if ((transition_table[i].Current_state == real_current_state || //Реалізація логіки FSM
              transition_table[i].Current_state == ANY_STATE) &&
-            transition_table[i].input == receivedEvent) 
+            transition_table[i].input == receivedEvent.state) 
         {
           
           if (transition_table[i].action != NULL) {
@@ -235,7 +331,8 @@ void Led_panic(){
   HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_2); //Коректна зупинка DMA
   HAL_TIM_Base_Stop_IT(&htim2);
   GPIO_LED_OUTPUT();
-
+  static char *msg = "\n\n\033[1;31m[ ! ] Program in panic mode, reset is imminent in 3, 2, 1 ...\033[0m\n\n";
+  osMessageQueuePut(Queue_UART,&msg, 0, 0);
   Blink_frequency(20);// Задаємо частоту 20Гц
 }
 
@@ -251,56 +348,251 @@ void LedTask(){
   }
 }
 
-void UartTask(){
-  while(1){
+void drop_to_idle(){
+  real_current_state = IDLE;
+  Led_output func_ptr = Led_idle;
+  osMessageQueuePut(Queue_LED, &func_ptr, 0, 0); // Відправляємо вказівник на функцію
 
+  static char *msg = "\n[FSM] Forced transition to IDLE\n";
+  osMessageQueuePut(Queue_UART,&msg, 0, 0);
+  
+}
+
+void get_uptime_string(char *out_buffer) {
+    TickType_t ticks = xTaskGetTickCount();
+    uint32_t total_seconds = ticks / configTICK_RATE_HZ;
+    
+    uint32_t hours = total_seconds / 3600;
+    uint32_t minutes = (total_seconds % 3600) / 60;
+    uint32_t seconds = total_seconds % 60;
+    
+    sprintf(out_buffer, "%02lu:%02u:%02u", (unsigned long)hours, (unsigned int)minutes, (unsigned int)seconds);
+}
+
+const char* state_names[] = {
+    "IDLE", "BLINK_SLOW", "BLINK_FAST", "BREATHE", "PANIC"
+};
+
+void status() {
+    static char status_buffer[256];
+    char uptime_str[16];
+    
+    // Отримуємо Uptime
+    get_uptime_string(uptime_str);
+    
+    // Отримуємо вільну купу (Heap)
+    size_t free_heap = xPortGetFreeHeapSize();
+    
+    snprintf(status_buffer, sizeof(status_buffer),
+             "\r\n[ SYSTEM STATUS ]\r\n"
+             "\r\nUptime: %s / State: %s / Heap free: %u B / Max latency: %u ms\r\n",
+             uptime_str, 
+             state_names[real_current_state], 
+             (unsigned int)free_heap,
+             (unsigned int)max_latency); //Формуємо оновне повідомлення
+    
+    char *ptr = status_buffer;
+    osMessageQueuePut(Queue_UART, &ptr, 0, 10); //Відправляємо в чергу
+}
+
+#define MAX_TASKS 10
+#define ROW_SIZE  64
+
+void tasks() {
+    static TaskStatus_t xTaskStatusArray[MAX_TASKS];
+    static char table_rows[MAX_TASKS + 10][ROW_SIZE];
+    UBaseType_t uxArraySize;
+    uint32_t ulTotalRunTime;
+    uint32_t row_idx = 0;
+
+    uxArraySize = uxTaskGetSystemState(xTaskStatusArray, MAX_TASKS, &ulTotalRunTime);
+
+    if (uxArraySize > 0) {
+
+        snprintf(table_rows[row_idx], ROW_SIZE, "\r\n               Tasks Table\r\n");
+        char *ptr = table_rows[row_idx++];
+        osMessageQueuePut(Queue_UART, &ptr, 0, 10);
+
+        snprintf(table_rows[row_idx], ROW_SIZE, "------------------------------------------\r\n");
+        ptr = table_rows[row_idx++];
+        osMessageQueuePut(Queue_UART, &ptr, 0, 10);
+
+        // Заголовок колонок
+        snprintf(table_rows[row_idx], ROW_SIZE, "Name         | St | Prio | HWM_Byte | ID\r\n");
+        ptr = table_rows[row_idx++];
+        osMessageQueuePut(Queue_UART, &ptr, 0, 10);
+
+        // Дані тасків
+        for (UBaseType_t x = 0; x < uxArraySize; x++) {
+            char stateChar = ' ';
+            switch (xTaskStatusArray[x].eCurrentState) {
+                case eRunning:   stateChar = 'X'; break;
+                case eReady:     stateChar = 'R'; break;
+                case eBlocked:   stateChar = 'B'; break;
+                case eSuspended: stateChar = 'S'; break;
+                default:         stateChar = '?'; break;
+            }
+
+            snprintf(table_rows[row_idx], ROW_SIZE, "%-12s | %-2c | %-4lu | %-8lu | %-2lu\r\n",
+                    xTaskStatusArray[x].pcTaskName, stateChar,
+                    xTaskStatusArray[x].uxCurrentPriority,
+                    (unsigned long)xTaskStatusArray[x].usStackHighWaterMark * 4,
+                    xTaskStatusArray[x].xTaskNumber);
+
+            ptr = table_rows[row_idx++];
+            osMessageQueuePut(Queue_UART, &ptr, 0, 10);
+            if (row_idx >= (MAX_TASKS + 8)) break; // Захист буфера
+        }
+
+        // HWM
+        static char manual_hwm[128];
+        snprintf(manual_hwm, sizeof(manual_hwm), 
+                "------------------------------------------\r\n"
+                "[HWM] Btn:%u Disp:%u Led:%u Uart:%u Stats:%u\r\n",
+                (unsigned int)uxTaskGetStackHighWaterMark(ButtonTaskHandle),
+                (unsigned int)uxTaskGetStackHighWaterMark(DispatchTaskHandle),
+                (unsigned int)uxTaskGetStackHighWaterMark(LedTaskHandle),
+                (unsigned int)uxTaskGetStackHighWaterMark(UartTaskHandle),
+                (unsigned int)uxTaskGetStackHighWaterMark(StatsTaskHandle));
+        char *m_ptr = manual_hwm;
+        osMessageQueuePut(Queue_UART, &m_ptr, 0, 10);
     }
 }
 
-void StatsTask(){
-  while(1){
-          
-    }
+void panic(){
+  real_current_state = PANIC;
+  Led_output func_ptr = Led_panic;
+  osMessageQueuePut(Queue_LED, &func_ptr, 0, 0); // Відправляємо вказівник на функцію
 }
 
+void reset_stats(){
+  max_latency = 0; //Скидаємо max_latency
+  static char *msg = "\nStats cleared\n";
+  osMessageQueuePut(Queue_UART,&msg, 0, 0);
+}
+
+void UartTask() {
+  char *msg_ptr;
+  int command_table_size = sizeof(command_table) / sizeof(command_table[0]);
+
+  for(;;) {
+    if (osMessageQueueGet(Queue_UART, &msg_ptr, NULL, 100) == osOK) { //Вивід в юарт через чергу
+      if (msg_ptr != NULL) {
+        HAL_UART_Transmit(&huart1, (uint8_t*)msg_ptr, strlen(msg_ptr), 200);
+      }
+    }
+
+    if (xSemaphoreTake(UART_INPUT_semaphore, 0) == pdTRUE) { //Обробка команд
+      bool command_found = false;
+      for (int i = 0; i < command_table_size; i++) {
+        if (strstr(rx_buffer, command_table[i].command_name) != NULL) {
+          if (command_table[i].action != NULL) {
+            command_table[i].action();
+          }
+          command_found = true;
+          break;
+        }
+      }
+      
+      if(!command_found) { // Невідома команда
+        char *err = "\nUnknown command\r\n";
+        HAL_UART_Transmit(&huart1, (uint8_t*)err, strlen(err), 100);
+      }
+
+      // Очищуємо буфер після обробки
+      memset(rx_buffer, 0, sizeof(rx_buffer));
+      rx_index = 0;
+    }
+  }
+}
+    
+
+void StatsTask() {
+    static char run_time_report[512]; // Буфер для рантайм статистики
+    char *r_ptr = run_time_report;
+
+    for (;;) {
+        osDelay(10000); // Кожні 10 секунд
+
+        // Очищуємо буфер
+        memset(run_time_report, 0, sizeof(run_time_report));
+
+        // Генеруємо звіт про використання процесора
+        vTaskGetRunTimeStats(run_time_report);
+      
+        static char *h_ptr = "\r\n------- CPU Usage (Run Time Stats) -------\r\nTask\t\tAbs Time\tTime %\r\n";
+        osMessageQueuePut(Queue_UART, &h_ptr, 0, osWaitForever);
+
+        // Відправка рантайм статистики
+        osMessageQueuePut(Queue_UART, &r_ptr, 0, osWaitForever);
+        
+        static char *f_ptr = "------------------------------------------\r\n";
+        osMessageQueuePut(Queue_UART, &f_ptr, 0, osWaitForever);
+    }
+}
 int main(void)
 {
-  /* 1. Насамперед — базовий HAL та тактування */
+  // Ініціалізація HAL та тактування
   HAL_Init();
   SystemClock_Config();
 
-  /* 2. Тепер периферія */
+  //Ініціалізація переферії
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_DMA_Init();
   MX_TIM2_Init();
-  /* 4. Ініціалізація RTOS */
-  osKernelInitialize();
-  
-  Button_semaphore = osSemaphoreNew(1, 0, NULL);
-  Queue_FSM = osMessageQueueNew(10, sizeof(Button_state), NULL);
-  Queue_LED = osMessageQueueNew(10, sizeof(Led_output), NULL);
+  MX_TIM3_Init();
 
+  osKernelInitialize(); // Ініціалізуємо РТОС
+
+  //Ініціалізація засобів IPC
+  Button_semaphore = xSemaphoreCreateBinary();
+  UART_INPUT_semaphore = xSemaphoreCreateBinary();
+  Queue_FSM = osMessageQueueNew(10, sizeof(Queue_FSM_data), NULL);
+  Queue_LED = osMessageQueueNew(10, sizeof(Led_output), NULL);
+  Queue_UART = osMessageQueueNew(20,  sizeof(char*), NULL);
+
+  HAL_UART_Receive_IT(&huart1, &rx_data, 1); // Ініціалізація роботи UART переривання
+
+  // Атрибути створених тасок
   const osThreadAttr_t ButtonTask_attributes = {
     .name = "ButtonTask",
-    .stack_size = 2048,
+    .stack_size = 1024,
     .priority = (osPriority_t) osPriorityAboveNormal,
   };
   const osThreadAttr_t DispatchTask_attributes = {
-    .name = "Dispatch", 
-    .stack_size = 2048, 
+    .name = "DispatchTask", 
+    .stack_size = 1024, 
     .priority = osPriorityNormal
   };
   const osThreadAttr_t LedTask_attributes = {
     .name = "LedTask", 
-    .stack_size = 2048, 
+    .stack_size = 1024, 
     .priority = osPriorityNormal
   };
-  HAL_GPIO_WritePin(GPIOA,Led_Pin, GPIO_PIN_RESET);
+  const osThreadAttr_t UartTask_attributes = {
+    .name = "UartTask", 
+    .stack_size = 1400, 
+    .priority = osPriorityNormal
+  };
+  const osThreadAttr_t StatsTask_attributes = {
+    .name = "StatsTask", 
+    .stack_size = 1300, 
+    .priority = osPriorityBelowNormal
+  };
+
+  HAL_GPIO_WritePin(GPIOA,Led_Pin, GPIO_PIN_RESET); // Ресет леда на початку програми
+
+  //Ініціалізація тасок
   ButtonTaskHandle = osThreadNew(ButtonTask, NULL, &ButtonTask_attributes);
+  UartTaskHandle = osThreadNew(UartTask, NULL, &UartTask_attributes);
   DispatchTaskHandle = osThreadNew(DispatchTask, NULL, &DispatchTask_attributes);
   LedTaskHandle = osThreadNew(LedTask, NULL, &LedTask_attributes);
-  osKernelStart();
+  StatsTaskHandle = osThreadNew(StatsTask, NULL, &StatsTask_attributes);
+
+  osKernelStart(); // Запускаємо РТОС
+
+
   while(1){}
 }
 
@@ -353,7 +645,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Stream6_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 
 }
@@ -419,6 +711,20 @@ static void MX_TIM2_Init(void)
   /* USER CODE BEGIN TIM2_Init 2 */
   /* USER CODE END TIM2_Init 2 */
 }
+
+
+static void MX_TIM3_Init(void) {
+    __HAL_RCC_TIM3_CLK_ENABLE();
+    htim3.Instance = TIM3;
+    htim3.Init.Prescaler = 15;
+    htim3.Init.Period = 100;
+    htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+    HAL_TIM_Base_Init(&htim3);
+    
+    HAL_NVIC_SetPriority(TIM3_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+}
+
 
 /**
   * @brief USART1 Initialization Function
@@ -496,11 +802,17 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
   if(GPIO_Pin == Button_Pin){
+
     static uint32_t last_interrupt_time = 0;
     uint32_t current_time = HAL_GetTick();
-    // Якщо переривання прийшло швидше ніж через 60 мс — ігноруємо його
+    
+    // Debounce 60 мс
     if ((current_time - last_interrupt_time) > 60) {
-      osSemaphoreRelease(Button_semaphore);
+      
+      BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+      if (xSemaphoreGiveFromISR(Button_semaphore, &xHigherPriorityTaskWoken) == pdTRUE) {
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+      }
     }
     last_interrupt_time = current_time;
   }
@@ -569,6 +881,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
       
     }
     else First_Timer_callback = 0;
+  }
+
+  if (htim->Instance == TIM3) {
+        ulHighFrequencyTimerTicks++;
   }
   
   /* USER CODE BEGIN Callback 1 */
