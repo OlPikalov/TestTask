@@ -55,22 +55,23 @@
    BLINK_SLOW            Мигання 1 Гц                                                                                                                                                          
    BLINK_FAST            Мигання 10 Гц                                                                                                                                                        
    BREATHE               Плавне "дихання" через PWM + DMA                                                                                                                                      
-   PANIC                 Мигання 20 Гц, UART повідомлення, очікування ресету                                                                                                                                                                                                                                                                                                                    Умови переходів між станами
+   PANIC                 Мигання 20 Гц, UART повідомлення, очікування ресету                                                                                                                                                                                                                                                                                                                 
 
-   Подія                 Перехід 
-   Short press           Циклічно: IDLE → BLINK_SLOW → BLINK_FAST → BREATHE → IDLE                           Double click          Будь-який → IDLE                                                                    Long press            Будь-який → PANIC
+   Умови переходів між станами                                                                                                                                                                  
+   Подія                 Перехід                                                                                                                                                             
+   Short press           Циклічно: IDLE → BLINK_SLOW → BLINK_FAST → BREATHE → IDLE                                                                                                                Double click          Будь-який → IDLE                                                                                                                                                         Long press            Будь-який → PANIC                                                                                                                                                          
 
 5. Таблиця задач
 
-   ------------------------------------------
-   Name         | Stack_size | Prio | ID
-   UartTask     | 1400       | 24   | 2 
-   StatsTask    | 1300       | 16   | 5 
-   DispatchTask | 1024       | 24   | 3 
-   ButtonTask   | 1024       | 32   | 1 
-   LedTask      | 1024       | 24   | 4 
-   ------------------------------------------
-   [HWM Check] Btn:196 Disp:202 Led:208 Uart:210 Stats:202
+   ------------------------------------------                                                                                                                                                  
+   Name         | Stack_size | Prio | ID                                                                                                                                                       
+   UartTask     | 1400       | 24   | 2                                                                                                                                                        
+   StatsTask    | 1300       | 16   | 5                                                                                                                                                        
+   DispatchTask | 1024       | 24   | 3                                                                                                                                                        
+   ButtonTask   | 1024       | 32   | 1                                                                                                                                                        
+   LedTask      | 1024       | 24   | 4                                                                                                                                                        
+   ------------------------------------------                                                                                                                                                  
+   [HWM Check] Btn:196 Disp:202 Led:208 Uart:210 Stats:202                                                                                                                                     
 
    Оптимальний розміру стеку, базується на HWM. Таким чином щоб запас вільної пам'яті був в +- 200.          Такий показник дозволяє зберігати баланс між компактністю та марнотратством.
 
