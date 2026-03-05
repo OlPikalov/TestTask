@@ -35,27 +35,27 @@
                                                                                                                  Queue_LED - черга відповідає за передачу вказівників на функції для регулювання частоти меготіння         ледом.                                                                                                                                                                                                              Queue_UART - черга відповідає за передачу повідомленнь по UART до Serial Monitor.    
                                                                                                                  Button_semaphore - семафор, який надає EXTI переривання, свідчить про натискання кнопки.                  Приймається в ButtonTask.
                                                                                                                  UART_INPUT_semaphore - семафор, який надає UART переривання, свідчить про отримання команди через         UART.                    
-                                                                                                              3.3 Діаграма
-                                                                                                                  [Button] -> (ISR) -> [Button_sem] -> [ButtonTask] 
-                                                  |
-                                             [Queue_FSM]
-                                                  |
-        [LED] <- [LedTask] <- [Queue_LED] <- [DispatchTask]
-                                                  ^
-                                                  |
-         [UART_RX] -> (ISR) -> [UART_sem] -> [UartTask] -> [UART_TX]
-                                                  ^
-                                                  |
-                             [StatsTask]  ->  [Queue_UART]
+3.3 Діаграма
+        [Button] -> (ISR) -> [Button_sem] -> [ButtonTask]                                                                                                                                     
+                                                  |                                                                                                                                            
+                                             [Queue_FSM]                                                                                                                                       
+                                                  |                                                                                                                                            
+        [LED] <- [LedTask] <- [Queue_LED] <- [DispatchTask]                                                                                                                                    
+                                                  ^                                                                                                                                            
+                                                  |                                                                                                                                            
+         [UART_RX] -> (ISR) -> [UART_sem] -> [UartTask] -> [UART_TX]                                                                                                                           
+                                                  ^                                                                                                                                            
+                                                  |                                                                                                                                            
+                             [StatsTask]  ->  [Queue_UART]                                                                                                                                     
 
-4. Схема FSM
+4. Схема FSM                                                                                                                                                                                   
    
-   Таблиця станів:
-                                                                                                             Стан                  Поведінка LED                                                                       IDLE                  Вимкнений
-   BLINK_SLOW            Мигання 1 Гц
-   BLINK_FAST            Мигання 10 Гц                                    
-   BREATHE               Плавне "дихання" через PWM + DMA                                          
-   PANIC                 Мигання 20 Гц, UART повідомлення, очікування ресету                                                                                                                                           Умови переходів між станами
+   Таблиця станів:                                                                                                                                                                             
+   Стан                  Поведінка LED                                                                                                                                                            IDLE                  Вимкнений
+   BLINK_SLOW            Мигання 1 Гц                                                                                                                                                          
+   BLINK_FAST            Мигання 10 Гц                                                                                                                                                        
+   BREATHE               Плавне "дихання" через PWM + DMA                                                                                                                                      
+   PANIC                 Мигання 20 Гц, UART повідомлення, очікування ресету                                                                                                                                                                                                                                                                                                                    Умови переходів між станами
 
    Подія                 Перехід 
    Short press           Циклічно: IDLE → BLINK_SLOW → BLINK_FAST → BREATHE → IDLE                           Double click          Будь-який → IDLE                                                                    Long press            Будь-який → PANIC
